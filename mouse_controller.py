@@ -1,47 +1,74 @@
 """
-Mouse control module.
-Handles coordinate transformation, cursor smoothing, and OS-level inputs.
+Mouse Controller module.
+Handles translating hand landmark positions into smooth mouse movements and clicks.
 """
 
 import pyautogui
 import numpy as np
 import config
 
-class MouseController:
-    def __init__(self):
-        # Disable fail-safe temporarily for edge-of-screen movements.
-        # (Warning: Set to True if you want to abort by slamming mouse to a corner)
-        pyautogui.FAILSAFE = False 
-        
-        # Get the actual resolution of your Windows monitor
-        self.screen_w, self.screen_h = pyautogui.size()
-        
-        # Variables to store the previous cursor position for our smoothing algorithm
-        self.prev_x, self.prev_y = 0, 0
+# Disable PyAutoGUI's built-in fail-safe pause (we handle timing ourselves)
+pyautogui.PAUSE = 0
+pyautogui.FAILSAFE = False
 
-    def move_mouse(self, cam_x, cam_y):
+
+class MouseController:
+
+    def __init__(self):
+        # Get the screen resolution once at startup
+        self.screen_w, self.screen_h = pyautogui.size()
+
+        # Smoothing factor (0.0 = frozen, 1.0 = raw/jittery)
+        # 0.2 means "move 20% toward new position each frame" → very smooth
+        # Tune this between 0.1 (ultra smooth) and 0.4 (more responsive)
+        self.smoothing = 0.18
+
+        # Store the last smoothed cursor position
+        # Start at the center of the screen
+        self.smooth_x = self.screen_w / 2
+        self.smooth_y = self.screen_h / 2
+
+        # Click debounce: track whether we were already clicking last frame
+        self.clicking = False
+
+    def move_mouse(self, finger_x, finger_y):
         """
-        Maps webcam coordinates to screen coordinates and moves the mouse.
+        Maps the finger position (in camera space) to screen space,
+        then applies exponential smoothing before actually moving the cursor.
         """
-        # 1. Coordinate Transformation
-        # np.interp linearly maps a value from one range to another.
-        # It converts our 640x480 webcam space to your 1920x1080 (or similar) screen space.
-        screen_x = np.interp(cam_x, (0, config.CAM_WIDTH), (0, self.screen_w))
-        screen_y = np.interp(cam_y, (0, config.CAM_HEIGHT), (0, self.screen_h))
-        
-        # 2. Cursor Smoothing (Exponential Moving Average)
-        # We don't jump straight to the new coordinate. We step towards it based on the SMOOTHING_FACTOR.
-        curr_x = self.prev_x + (screen_x - self.prev_x) / config.SMOOTHING_FACTOR
-        curr_y = self.prev_y + (screen_y - self.prev_y) / config.SMOOTHING_FACTOR
-        
-        # 3. Actuation
-        pyautogui.moveTo(curr_x, curr_y)
-        
-        # Update state for the next frame
-        self.prev_x, self.prev_y = curr_x, curr_y
+        # --- 1. Map camera coords → screen coords ---
+        # We use a reduced "active zone" in the center of the camera frame
+        # so you don't have to reach the very edges of the frame to hit screen edges.
+        # Clamp first, then interpolate.
+        margin = getattr(config, 'FRAME_MARGIN', 80)
+
+        cam_x = np.clip(finger_x, margin, config.CAM_WIDTH - margin)
+        cam_y = np.clip(finger_y, margin, config.CAM_HEIGHT - margin)
+
+        # Linear interpolation from camera active zone → full screen
+        target_x = np.interp(cam_x, [margin, config.CAM_WIDTH - margin], [0, self.screen_w])
+        target_y = np.interp(cam_y, [margin, config.CAM_HEIGHT - margin], [0, self.screen_h])
+
+        # --- 2. Exponential smoothing (low-pass filter) ---
+        # new_pos = old_pos + smoothing * (target - old_pos)
+        # This prevents jittery raw landmark data from shaking the cursor.
+        self.smooth_x += self.smoothing * (target_x - self.smooth_x)
+        self.smooth_y += self.smoothing * (target_y - self.smooth_y)
+
+        # --- 3. Move cursor ---
+        pyautogui.moveTo(int(self.smooth_x), int(self.smooth_y))
 
     def click(self):
         """
-        Executes a native Windows left-click.
+        Performs a single click with debounce to avoid repeated clicks
+        while the pinch gesture is held.
         """
-        pyautogui.click()
+        if not self.clicking:
+            pyautogui.click()
+            self.clicking = True
+
+    def release(self):
+        """
+        Call this when the click gesture ends so the next pinch registers again.
+        """
+        self.clicking = False

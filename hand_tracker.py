@@ -7,7 +7,9 @@ import cv2
 import mediapipe as mp
 import math
 
+
 class HandTracker:
+
     def __init__(self, mode=False, max_hands=1, detection_con=0.7, track_con=0.5):
         """
         Initializes the MediaPipe Hands object.
@@ -29,11 +31,16 @@ class HandTracker:
             min_detection_confidence=self.detection_con,
             min_tracking_confidence=self.track_con
         )
+
         # Utility to draw landmarks on the OpenCV image
         self.mp_draw = mp.solutions.drawing_utils
 
         # Store landmarks to access across methods
         self.landmark_list = []
+
+        # FIX 1: Initialize self.results to None so get_positions() doesn't crash
+        # on the very first frame before find_hands() has been called.
+        self.results = None
 
     def find_hands(self, img, draw=True):
         """
@@ -48,7 +55,6 @@ class HandTracker:
                 if draw:
                     # Draw the nodes and connections on the image
                     self.mp_draw.draw_landmarks(img, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
-        
         return img
 
     def get_positions(self, img):
@@ -57,29 +63,40 @@ class HandTracker:
         :return: List of tuples -> [(id, x, y), ...]
         """
         self.landmark_list = []
-        
-        if self.results.multi_hand_landmarks:
-            # Since max_hands=1, we grab the first detected hand
-            my_hand = self.results.multi_hand_landmarks[0]
-            
-            # Get the dimensions of the image to convert normalized ratios to actual pixels
-            h, w, c = img.shape
-            
-            for id, lm in enumerate(my_hand.landmark):
-                # lm.x and lm.y are normalized between 0.0 and 1.0. 
-                # Multiply by width and height to get pixel coordinates.
-                cx, cy = int(lm.x * w), int(lm.y * h)
-                self.landmark_list.append((id, cx, cy))
-                
+
+        # FIX 2: Guard against self.results being None (first frame race condition)
+        # and against multi_hand_landmarks being None (no hand visible).
+        if self.results is None or not self.results.multi_hand_landmarks:
+            return self.landmark_list
+
+        # Since max_hands=1, we grab the first detected hand
+        my_hand = self.results.multi_hand_landmarks[0]
+
+        # Get the dimensions of the image to convert normalized ratios to actual pixels
+        h, w, c = img.shape
+
+        for id, lm in enumerate(my_hand.landmark):
+            # lm.x and lm.y are normalized between 0.0 and 1.0.
+            # Multiply by width and height to get pixel coordinates.
+            cx, cy = int(lm.x * w), int(lm.y * h)
+            self.landmark_list.append((id, cx, cy))
+
         return self.landmark_list
 
     def calculate_distance(self, p1_id, p2_id):
         """
         Calculates the Euclidean distance between two specific landmarks.
         Used primarily to detect the pinch gesture (thumb and index).
+
+        Returns (distance, point1, point2).
+        Returns (None, None, None) if landmarks are not available,
+        so callers can distinguish "no hand" from a real distance of 0.
         """
+        # FIX 3: Return None (not 0) when no hand is detected.
+        # Returning 0 was causing a phantom click every frame when no hand
+        # was visible, because 0 < CLICK_THRESHOLD (30) is always True.
         if len(self.landmark_list) == 0:
-            return 0, [0, 0], [0, 0]
+            return None, None, None
 
         # Extract x, y coordinates using the landmark IDs
         x1, y1 = self.landmark_list[p1_id][1], self.landmark_list[p1_id][2]
@@ -87,5 +104,4 @@ class HandTracker:
 
         # Euclidean distance formula
         distance = math.hypot(x2 - x1, y2 - y1)
-        
         return distance, (x1, y1), (x2, y2)
